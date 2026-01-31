@@ -1,4 +1,4 @@
 streamlit
 pandas
-google-generativeai
+requests
 streamlit-paste-button
