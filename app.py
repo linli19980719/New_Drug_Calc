@@ -3,9 +3,10 @@ import pandas as pd
 import google.generativeai as genai
 from streamlit_paste_button import paste_image_button
 import io
+import json
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="AI 藥品計算機 (專業版)", page_icon="👨‍⚕️", layout="wide")
+st.set_page_config(page_title="AI 藥品計算機 (完整版)", page_icon="👨‍⚕️", layout="wide")
 
 st.markdown("""
     <style>
@@ -19,7 +20,6 @@ st.markdown("""
 @st.cache_data
 def load_database():
     try:
-        # 直接讀取，若格式錯誤會顯示明確訊息
         df = pd.read_csv('drug_database.csv')
         df.columns = [c.strip() for c in df.columns]
         df['藥代'] = df['藥代'].astype(str).str.strip().str.upper()
@@ -30,7 +30,6 @@ def load_database():
                df.set_index('藥代')['藥名'].to_dict(), \
                df.set_index('藥代')['警語'].to_dict()
     except Exception as e:
-        st.error(f"資料庫讀取錯誤：{e}")
         return {}, {}, {}
 
 PRICE_DB, NAME_DB, WARN_DB = load_database()
@@ -47,17 +46,14 @@ def format_prescription(weight, drugs_list, analysis, note):
         p = PRICE_DB.get(d['code'], 0)
         cost = p * d['qty']
         total_price += cost
-        
-        # 檢查警語
         w = WARN_DB.get(d['code'], "")
         warn_text = f"⛔ {w}" if w else ""
         if w: has_warning = True
-        
         drug_lines.append(f"- **{d['name']}**: {d['qty']} 顆  {warn_text}")
     
     warning_block = ""
     if has_warning:
-        warning_block = "\n<div class='danger-box'>⚠️ 注意：本處方包含警示藥物 (如G6PD/兒童禁用)，請核對！</div>\n"
+        warning_block = "\n<div class='danger-box'>⚠️ 注意：本處方包含警示藥物 (如G6PD/兒童禁用)！</div>\n"
     
     return f"""### 💊 處方建議 (3天份)
 **體重：** {weight} kg
@@ -75,7 +71,6 @@ def format_prescription(weight, drugs_list, analysis, note):
 
 def calc_amo1_complex(weight, mode='high'):
     """AMO1 (Curam) + Amox 混藥計算"""
-    # 參數定義
     if mode == 'high':
         target_amox_kg, target_ratio, mode_name = 80, 14, "急性鼻竇炎 (80mg/kg)"
     else:
@@ -83,40 +78,32 @@ def calc_amo1_complex(weight, mode='high'):
 
     limit_clav_kg, limit_amox_max, adult_weight_cutoff = 10, 2000, 22
 
-    # 成人封頂 (22kg以上)
     if weight >= adult_weight_cutoff:
         return format_prescription(weight, 
             [{'name': 'Curam (500/125)', 'qty': 6, 'code': 'AMO1'}, {'name': 'Amoxicillin (500mg)', 'qty': 6, 'code': 'AX'}],
             f"- Amox: 2000 mg/day (成人封頂)\n- Clav: 250 mg/day", "已達成人封頂劑量")
 
-    # 計算需求
     daily_amox_req = min(target_amox_kg * weight, limit_amox_max)
     daily_clav_limit = limit_clav_kg * weight
     
     if mode == 'high':
-        # 鼻竇炎: 14:1 比例
         daily_clav_final = min(daily_amox_req / target_ratio, daily_clav_limit)
     else:
-        # 標準: Clav 提供基礎殺菌 (約 6.4mg/kg) 或是上限
         daily_clav_final = min(6.4 * weight, daily_clav_limit)
 
-    # Curam 顆數 (3天)
     curam_qty = int(round((daily_clav_final * 3) / 125))
     provided_amox = curam_qty * 500
     provided_clav = curam_qty * 125
     
-    # 補足 Amox
     rem_amox = max(0, (daily_amox_req * 3) - provided_amox)
     qty_500 = int(round(rem_amox / 500))
     qty_250 = int(round(rem_amox / 250))
     
-    # 判斷用 500 (AX) 還是 250 (AM) 誤差小
     if abs(qty_250*250 - rem_amox) < abs(qty_500*500 - rem_amox) and abs(qty_500*500 - rem_amox) > 100:
         amox_qty, amox_code, amox_name = qty_250, 'AM', "Amoxicillin (250mg)"
     else:
         amox_qty, amox_code, amox_name = qty_500, 'AX', "Amoxicillin (500mg)"
         
-    # 驗算
     real_amox = (provided_amox + (amox_qty * (250 if amox_code=='AM' else 500))) / 3
     real_clav = provided_clav / 3
     ratio = round(real_amox / real_clav, 1) if real_clav > 0 else 0
@@ -130,11 +117,8 @@ def calc_amo1_complex(weight, mode='high'):
 
 def calc_simple_antibiotic(weight, drug_code):
     """處理其他抗生素"""
-    
-    # 1. CIP0
     if drug_code == 'CIP0':
-        if weight < 40: # 兒童
-            # 10-20mg/kg BID
+        if weight < 40:
             min_d, max_d = weight * 10, min(weight * 20, 750)
             min_t, max_t = round(min_d/500, 2), round(max_d/500, 2)
             avg_tab_bid = round((min_t + max_t) / 2 * 2) / 2
@@ -142,16 +126,14 @@ def calc_simple_antibiotic(weight, drug_code):
             return format_prescription(weight, [{'name': 'Ciprofloxacin (500mg)', 'qty': total, 'code': 'CIP0'}], 
                 f"劑量: {min_d}-{max_d} mg/dose (BID)\n每次約 {min_t}-{max_t} 顆", 
                 "⚠️ 兒童使用需評估關節風險。")
-        else: # 成人
+        else:
             return format_prescription(weight, [{'name': 'Ciprofloxacin (500mg)', 'qty': 6, 'code': 'CIP0'}], "成人劑量: 500mg (1#) BID", "⚠️ 蠶豆症禁用")
 
-    # 2. AZI2
     elif drug_code == 'AZI2':
         d = round((weight*10/250)*2)/2 if weight<20 else (1.5 if weight<=40 else 2)
         note = "成人劑量" if weight > 40 else "用法：QD (每日一次)"
         return format_prescription(weight, [{'name': 'Azithromycin (250mg)', 'qty': d*3, 'code': 'AZI2'}], f"每日 {d} 顆 (10mg/kg)", note)
 
-    # 3. AM / AX (純 Amox 45mg)
     elif drug_code in ['AM', 'AX']: 
         target = weight * 45 * 3
         qty_ax = int(round(target/500))
@@ -161,7 +143,6 @@ def calc_simple_antibiotic(weight, drug_code):
         else:
             return format_prescription(weight, [{'name': 'Amoxicillin (500mg)', 'qty': qty_ax, 'code': 'AX'}], f"目標 45mg/kg", "標準劑量")
 
-    # 4. K5 / CEP (40mg)
     elif drug_code in ['K5', 'CEP']: 
         target = weight * 40 * 3
         qty_k5, qty_cep = int(round(target/500)), int(round(target/250))
@@ -170,7 +151,6 @@ def calc_simple_antibiotic(weight, drug_code):
         else:
             return format_prescription(weight, [{'name': 'Cephalexin (500mg)', 'qty': qty_k5, 'code': 'K5'}], f"目標 40mg/kg", "建議分 4 次 (QID)")
 
-    # 5. MOR (Baktar)
     elif drug_code == 'MOR': 
         if weight >= 40:
             return format_prescription(weight, [{'name': 'Baktar (MOR)', 'qty': 12, 'code': 'MOR'}], "成人: 2# BID", "⚠️ 蠶豆症禁用")
@@ -178,20 +158,40 @@ def calc_simple_antibiotic(weight, drug_code):
             dose = round((weight/20)*2)/2 or 0.5
             return format_prescription(weight, [{'name': 'Baktar (MOR)', 'qty': dose*2*3, 'code': 'MOR'}], f"公式 BW/20 = {dose}顆/次", "⚠️ 蠶豆症禁用")
             
-    # 6. DOX0
     elif drug_code == 'DOX0':
-        return format_prescription(weight, [{'name': 'Doxycycline (100mg)', 'qty': 6, 'code': 'DOX0'}], "成人: 1# BID", "⚠️ 8歲以下不建議 (牙齒染色)")
+        return format_prescription(weight, [{'name': 'Doxycycline (100mg)', 'qty': 6, 'code': 'DOX0'}], "成人: 1# BID", "⚠️ 8歲以下不建議")
 
     return "Error: Unknown Drug"
 
-# --- 4. 前端介面 ---
+# --- 4. AI 視覺辨識 (新增回來的邏輯) ---
+def analyze_image(img_bytes, api_key):
+    if not api_key: return []
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = """
+        請分析這張藥單圖片，提取藥品清單。
+        回傳 JSON List，包含：
+        1. code: 藥品代碼 (如 AZI2, CEP, CIP0, MEDN...)。
+        2. frequency: 頻率 (TID=3, BID=2, QID=4, QD=1)。
+        3. total_amount: 總量數字。
+        格式範例: [{"code":"AZI2", "frequency":1, "total_amount":3}, {"code":"CIP0", "frequency":2, "total_amount":6}]
+        """
+        response = model.generate_content([prompt, {"mime_type": "image/png", "data": img_bytes}])
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+    except Exception as e:
+        st.error(f"AI 讀取失敗: {e}")
+        return []
+
+# --- 5. 前端介面 ---
 st.sidebar.title("☁️ 雲端藥品計算機")
-st.sidebar.info("Ver 3.1 - 完整精算版")
-api_key = st.sidebar.text_input("Gemini API Key (選填)", type="password")
+st.sidebar.info("Ver 3.2 - 完整修復版")
+api_key = st.sidebar.text_input("Gemini API Key", type="password")
 weight = st.sidebar.number_input("體重 (kg)", value=20.0, step=0.5)
 
-if not PRICE_DB: st.sidebar.error("⚠️ 請確認 drug_database.csv 已上傳且格式正確")
-else: st.sidebar.success(f"📚 藥品庫正常：載入 {len(PRICE_DB)} 筆")
+if not PRICE_DB: st.sidebar.error("⚠️ 請確認 drug_database.csv 已上傳")
+else: st.sidebar.success(f"📚 藥品庫：{len(PRICE_DB)} 筆")
 
 tab1, tab2 = st.tabs(["🧮 抗生素精算", "📷 截圖辨識"])
 
@@ -209,7 +209,32 @@ with tab1:
             st.markdown(f"""<div class="report-box" unsafe_allow_html=True>{calc_simple_antibiotic(weight, code_map[abx.split()[0]])}</div>""", unsafe_allow_html=True)
 
 with tab2:
-    st.info("若需使用截圖功能，請輸入 API Key")
-    # (此處保留擴充彈性)
+    st.subheader("AI 藥單辨識")
     paste_res = paste_image_button("📋 貼上截圖", background_color="#6c757d", text_color="#FFF")
-    if paste_res.image_data: st.image(paste_res.image_data)
+    
+    if paste_res.image_data:
+        st.image(paste_res.image_data, caption="預覽圖片")
+        
+        # --- 這裡就是之前漏掉的按鈕與邏輯 ---
+        if st.button("🚀 開始 AI 分析", type="primary"):
+            if not api_key:
+                st.error("❌ 請先在左側欄位輸入 Gemini API Key")
+            else:
+                with st.spinner("AI 正在分析中..."):
+                    bytes_io = io.BytesIO()
+                    paste_res.image_data.save(bytes_io, format='PNG')
+                    items = analyze_image(bytes_io.getvalue(), api_key)
+                
+                if items:
+                    results = []
+                    for item in items:
+                        # 簡單的顯示邏輯，若需要複雜計算可再串接
+                        code = item.get('code', 'UNKNOWN')
+                        qty = item.get('total_amount', 0)
+                        name = NAME_DB.get(code, code)
+                        price = PRICE_DB.get(code, 0)
+                        results.append({"代碼": code, "藥名": name, "總量": qty, "小計": price*qty})
+                    
+                    st.dataframe(pd.DataFrame(results))
+                else:
+                    st.warning("AI 未能辨識出有效藥品")
