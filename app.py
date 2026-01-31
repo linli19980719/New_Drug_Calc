@@ -164,26 +164,51 @@ def calc_simple_antibiotic(weight, drug_code):
     return "Error: Unknown Drug"
 
 # --- 4. AI 視覺辨識 (新增回來的邏輯) ---
+# --- 4. AI 視覺辨識 (強韌除錯版) ---
 def analyze_image(img_bytes, api_key):
-    if not api_key: return []
+    if not api_key:
+        st.error("❌ 錯誤：未偵測到 API Key。請在左側欄位輸入。")
+        return []
+        
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # 提示詞優化：強制 AI 閉嘴，只給 JSON
         prompt = """
-        請分析這張藥單圖片，提取藥品清單。
-        回傳 JSON List，包含：
-        1. code: 藥品代碼 (如 AZI2, CEP, CIP0, MEDN...)。
-        2. frequency: 頻率 (TID=3, BID=2, QID=4, QD=1)。
-        3. total_amount: 總量數字。
-        格式範例: [{"code":"AZI2", "frequency":1, "total_amount":3}, {"code":"CIP0", "frequency":2, "total_amount":6}]
+        你是專業的藥品辨識系統。請分析這張圖片，提取藥品清單。
+        【嚴格規則】
+        1. 只回傳純 JSON List。
+        2. 不要使用 markdown 標記 (如 ```json)。
+        3. 不要說任何開場白或結語。
+        4. 欄位：code (轉大寫), frequency (次數數字), total_amount (總量數字)。
+        
+        範例：
+        [{"code":"AZI2", "frequency":1, "total_amount":3}, {"code":"CIP0", "frequency":2, "total_amount":6}]
         """
+        
         response = model.generate_content([prompt, {"mime_type": "image/png", "data": img_bytes}])
-        text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        
+        # 1. 嘗試清理字串 (有些 AI 還是會頑皮地加上 markdown)
+        raw_text = response.text
+        clean_text = raw_text.replace("```json", "").replace("```", "").strip()
+        
+        # 2. 嘗試解析
+        try:
+            return json.loads(clean_text)
+        except json.JSONDecodeError:
+            # 如果解析失敗，顯示 AI 到底說了什麼，方便除錯
+            st.error("⚠️ AI 回傳了非 JSON 格式的內容，請重試。")
+            with st.expander("查看 AI 原始回覆 (除錯用)"):
+                st.text(raw_text)
+            return []
+            
     except Exception as e:
-        st.error(f"AI 讀取失敗: {e}")
+        # 這裡是抓 API 連線錯誤 (例如 Key 無效)
+        st.error(f"❌ 連線失敗：{str(e)}")
+        if "400" in str(e):
+            st.warning("提示：這通常代表 API Key 無效，或圖片格式有問題。")
         return []
-
 # --- 5. 前端介面 ---
 st.sidebar.title("☁️ 雲端藥品計算機")
 st.sidebar.info("Ver 3.2 - 完整修復版")
