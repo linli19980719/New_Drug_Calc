@@ -3,11 +3,18 @@ import pandas as pd
 from streamlit_paste_button import paste_image_button
 import io
 import json
-import requests
 import base64
 
+# --- 0. 防呆機制：檢查必要套件 ---
+try:
+    import requests
+except ImportError:
+    st.error("🛑 系統偵測到嚴重錯誤：缺少 `requests` 套件！")
+    st.info("修復教學：\n1. 請打開您的 `requirements.txt` 檔案。\n2. 在裡面加上一行 `requests`。\n3. 重新上傳到 GitHub。\n4. 回來這裡按 Reboot app。")
+    st.stop()
+
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="AI 藥品計算機 (REST API版)", page_icon="👨‍⚕️", layout="wide")
+st.set_page_config(page_title="AI 藥品計算機 (Ver 4.1)", page_icon="👨‍⚕️", layout="wide")
 
 st.markdown("""
     <style>
@@ -35,7 +42,7 @@ def load_database():
 
 PRICE_DB, NAME_DB, WARN_DB = load_database()
 
-# --- 3. 核心計算引擎 (維持原樣) ---
+# --- 3. 核心計算引擎 ---
 def format_prescription(weight, drugs_list, analysis, note):
     drug_lines = []
     total_price = 0
@@ -153,7 +160,7 @@ def calc_simple_antibiotic(weight, drug_code):
         return format_prescription(weight, [{'name': 'Doxycycline (100mg)', 'qty': 6, 'code': 'DOX0'}], "成人: 1# BID", "⚠️ 8歲以下不建議")
     return "Error: Unknown Drug"
 
-# --- 4. AI 視覺辨識 (改用 REST API 直連) ---
+# --- 4. AI 視覺辨識 (REST API) ---
 def analyze_image_rest(img_bytes, api_key):
     if not api_key: return "ERROR: API Key Missing"
     
@@ -186,7 +193,6 @@ def analyze_image_rest(img_bytes, api_key):
             return []
             
         result = response.json()
-        # 解析回傳內容
         raw_text = result['candidates'][0]['content']['parts'][0]['text']
         clean_text = raw_text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean_text)
@@ -197,7 +203,7 @@ def analyze_image_rest(img_bytes, api_key):
 
 # --- 5. 前端介面 ---
 st.sidebar.title("☁️ 雲端藥品計算機")
-st.sidebar.info("Ver 4.0 - REST API 終極版")
+st.sidebar.info("Ver 4.1 - 防呆穩定版")
 api_key = st.sidebar.text_input("Gemini API Key", type="password")
 weight = st.sidebar.number_input("體重 (kg)", value=20.0, step=0.5)
 
@@ -220,13 +226,13 @@ with tab1:
             st.markdown(f"""<div class="report-box" unsafe_allow_html=True>{calc_simple_antibiotic(weight, code_map[abx.split()[0]])}</div>""", unsafe_allow_html=True)
 
 with tab2:
-    st.subheader("AI 藥單辨識")
+    st.subheader("AI 藥單辨識 (REST API)")
     paste_res = paste_image_button("📋 貼上截圖", background_color="#6c757d", text_color="#FFF")
     
     if paste_res.image_data:
         st.image(paste_res.image_data, caption="預覽圖片")
         
-        if st.button("🚀 開始 AI 分析 (REST API)", type="primary"):
+        if st.button("🚀 開始 AI 分析", type="primary"):
             if not api_key:
                 st.error("❌ 請先在左側欄位輸入 Gemini API Key")
             else:
