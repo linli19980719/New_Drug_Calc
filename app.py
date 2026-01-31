@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
 from streamlit_paste_button import paste_image_button
 import io
 import json
+import requests
+import base64
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="AI 藥品計算機 (完整版)", page_icon="👨‍⚕️", layout="wide")
+st.set_page_config(page_title="AI 藥品計算機 (REST API版)", page_icon="👨‍⚕️", layout="wide")
 
 st.markdown("""
     <style>
@@ -34,10 +35,8 @@ def load_database():
 
 PRICE_DB, NAME_DB, WARN_DB = load_database()
 
-# --- 3. 核心計算引擎 ---
-
+# --- 3. 核心計算引擎 (維持原樣) ---
 def format_prescription(weight, drugs_list, analysis, note):
-    """輸出格式化"""
     drug_lines = []
     total_price = 0
     has_warning = False
@@ -70,7 +69,6 @@ def format_prescription(weight, drugs_list, analysis, note):
 """
 
 def calc_amo1_complex(weight, mode='high'):
-    """AMO1 (Curam) + Amox 混藥計算"""
     if mode == 'high':
         target_amox_kg, target_ratio, mode_name = 80, 14, "急性鼻竇炎 (80mg/kg)"
     else:
@@ -116,7 +114,6 @@ def calc_amo1_complex(weight, mode='high'):
         f"- Amox: {int(real_amox)} mg/day ({round(real_amox/weight,1)} mg/kg)\n- Clav: {int(real_clav)} mg/day ({round(real_clav/weight,1)} mg/kg)\n- 比例: {ratio} : 1", note)
 
 def calc_simple_antibiotic(weight, drug_code):
-    """處理其他抗生素"""
     if drug_code == 'CIP0':
         if weight < 40:
             min_d, max_d = weight * 10, min(weight * 20, 750)
@@ -128,12 +125,10 @@ def calc_simple_antibiotic(weight, drug_code):
                 "⚠️ 兒童使用需評估關節風險。")
         else:
             return format_prescription(weight, [{'name': 'Ciprofloxacin (500mg)', 'qty': 6, 'code': 'CIP0'}], "成人劑量: 500mg (1#) BID", "⚠️ 蠶豆症禁用")
-
     elif drug_code == 'AZI2':
         d = round((weight*10/250)*2)/2 if weight<20 else (1.5 if weight<=40 else 2)
         note = "成人劑量" if weight > 40 else "用法：QD (每日一次)"
         return format_prescription(weight, [{'name': 'Azithromycin (250mg)', 'qty': d*3, 'code': 'AZI2'}], f"每日 {d} 顆 (10mg/kg)", note)
-
     elif drug_code in ['AM', 'AX']: 
         target = weight * 45 * 3
         qty_ax = int(round(target/500))
@@ -142,7 +137,6 @@ def calc_simple_antibiotic(weight, drug_code):
             return format_prescription(weight, [{'name': 'Amoxicillin (250mg)', 'qty': qty_am, 'code': 'AM'}], f"目標 45mg/kg", "標準劑量")
         else:
             return format_prescription(weight, [{'name': 'Amoxicillin (500mg)', 'qty': qty_ax, 'code': 'AX'}], f"目標 45mg/kg", "標準劑量")
-
     elif drug_code in ['K5', 'CEP']: 
         target = weight * 40 * 3
         qty_k5, qty_cep = int(round(target/500)), int(round(target/250))
@@ -150,68 +144,60 @@ def calc_simple_antibiotic(weight, drug_code):
             return format_prescription(weight, [{'name': 'Cephalexin (250mg)', 'qty': qty_cep, 'code': 'CEP'}], f"目標 40mg/kg", "建議分 4 次 (QID)")
         else:
             return format_prescription(weight, [{'name': 'Cephalexin (500mg)', 'qty': qty_k5, 'code': 'K5'}], f"目標 40mg/kg", "建議分 4 次 (QID)")
-
     elif drug_code == 'MOR': 
-        if weight >= 40:
-            return format_prescription(weight, [{'name': 'Baktar (MOR)', 'qty': 12, 'code': 'MOR'}], "成人: 2# BID", "⚠️ 蠶豆症禁用")
+        if weight >= 40: return format_prescription(weight, [{'name': 'Baktar (MOR)', 'qty': 12, 'code': 'MOR'}], "成人: 2# BID", "⚠️ 蠶豆症禁用")
         else:
             dose = round((weight/20)*2)/2 or 0.5
             return format_prescription(weight, [{'name': 'Baktar (MOR)', 'qty': dose*2*3, 'code': 'MOR'}], f"公式 BW/20 = {dose}顆/次", "⚠️ 蠶豆症禁用")
-            
     elif drug_code == 'DOX0':
         return format_prescription(weight, [{'name': 'Doxycycline (100mg)', 'qty': 6, 'code': 'DOX0'}], "成人: 1# BID", "⚠️ 8歲以下不建議")
-
     return "Error: Unknown Drug"
 
-# --- 4. AI 視覺辨識 (新增回來的邏輯) ---
-# --- 4. AI 視覺辨識 (強韌除錯版) ---
-def analyze_image(img_bytes, api_key):
-    if not api_key:
-        st.error("❌ 錯誤：未偵測到 API Key。請在左側欄位輸入。")
-        return []
-        
+# --- 4. AI 視覺辨識 (改用 REST API 直連) ---
+def analyze_image_rest(img_bytes, api_key):
+    if not api_key: return "ERROR: API Key Missing"
+    
+    # 轉為 Base64
+    base64_data = base64.b64encode(img_bytes).decode('utf-8')
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {'Content-Type': 'application/json'}
+    
+    prompt_text = """
+    你是專業的藥品辨識系統。請分析這張藥單圖片。
+    請直接回傳純 JSON List，不要有任何 markdown 標記。
+    格式：[{"code":"藥品代碼大寫", "frequency":次數數字, "total_amount":總量數字}]
+    範例：[{"code":"AZI2", "frequency":1, "total_amount":3}]
+    """
+    
+    data = {
+        "contents": [{
+            "parts": [
+                {"text": prompt_text},
+                {"inline_data": {"mime_type": "image/png", "data": base64_data}}
+            ]
+        }]
+    }
+    
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
-        # 提示詞優化：強制 AI 閉嘴，只給 JSON
-        prompt = """
-        你是專業的藥品辨識系統。請分析這張圖片，提取藥品清單。
-        【嚴格規則】
-        1. 只回傳純 JSON List。
-        2. 不要使用 markdown 標記 (如 ```json)。
-        3. 不要說任何開場白或結語。
-        4. 欄位：code (轉大寫), frequency (次數數字), total_amount (總量數字)。
-        
-        範例：
-        [{"code":"AZI2", "frequency":1, "total_amount":3}, {"code":"CIP0", "frequency":2, "total_amount":6}]
-        """
-        
-        response = model.generate_content([prompt, {"mime_type": "image/png", "data": img_bytes}])
-        
-        # 1. 嘗試清理字串 (有些 AI 還是會頑皮地加上 markdown)
-        raw_text = response.text
-        clean_text = raw_text.replace("```json", "").replace("```", "").strip()
-        
-        # 2. 嘗試解析
-        try:
-            return json.loads(clean_text)
-        except json.JSONDecodeError:
-            # 如果解析失敗，顯示 AI 到底說了什麼，方便除錯
-            st.error("⚠️ AI 回傳了非 JSON 格式的內容，請重試。")
-            with st.expander("查看 AI 原始回覆 (除錯用)"):
-                st.text(raw_text)
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code != 200:
+            st.error(f"Google API 回傳錯誤: {response.text}")
             return []
             
+        result = response.json()
+        # 解析回傳內容
+        raw_text = result['candidates'][0]['content']['parts'][0]['text']
+        clean_text = raw_text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean_text)
+        
     except Exception as e:
-        # 這裡是抓 API 連線錯誤 (例如 Key 無效)
-        st.error(f"❌ 連線失敗：{str(e)}")
-        if "400" in str(e):
-            st.warning("提示：這通常代表 API Key 無效，或圖片格式有問題。")
+        st.error(f"連線或解析失敗: {str(e)}")
         return []
+
 # --- 5. 前端介面 ---
 st.sidebar.title("☁️ 雲端藥品計算機")
-st.sidebar.info("Ver 3.2 - 完整修復版")
+st.sidebar.info("Ver 4.0 - REST API 終極版")
 api_key = st.sidebar.text_input("Gemini API Key", type="password")
 weight = st.sidebar.number_input("體重 (kg)", value=20.0, step=0.5)
 
@@ -240,20 +226,18 @@ with tab2:
     if paste_res.image_data:
         st.image(paste_res.image_data, caption="預覽圖片")
         
-        # --- 這裡就是之前漏掉的按鈕與邏輯 ---
-        if st.button("🚀 開始 AI 分析", type="primary"):
+        if st.button("🚀 開始 AI 分析 (REST API)", type="primary"):
             if not api_key:
                 st.error("❌ 請先在左側欄位輸入 Gemini API Key")
             else:
                 with st.spinner("AI 正在分析中..."):
                     bytes_io = io.BytesIO()
                     paste_res.image_data.save(bytes_io, format='PNG')
-                    items = analyze_image(bytes_io.getvalue(), api_key)
+                    items = analyze_image_rest(bytes_io.getvalue(), api_key)
                 
                 if items:
                     results = []
                     for item in items:
-                        # 簡單的顯示邏輯，若需要複雜計算可再串接
                         code = item.get('code', 'UNKNOWN')
                         qty = item.get('total_amount', 0)
                         name = NAME_DB.get(code, code)
@@ -262,4 +246,4 @@ with tab2:
                     
                     st.dataframe(pd.DataFrame(results))
                 else:
-                    st.warning("AI 未能辨識出有效藥品")
+                    st.warning("AI 無法辨識內容")
